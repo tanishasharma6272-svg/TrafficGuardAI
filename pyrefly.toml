@@ -1,0 +1,4 @@
+python-interpreter-path = "backend/.venv/Scripts/python.exe"
+python-version = "3.12"
+python-platform = "win32"
+search-path = ["backend"]
