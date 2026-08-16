@@ -35,3 +35,19 @@ htmlcov/
 # Local databases
 *.sqlite
 *.sqlite3
+
+# Python virtual environment
+backend/.venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Environment variables / secrets
+.env
+.env.*
+!.env.example
+
+# Local data
+data/*
+!data/.gitkeep
