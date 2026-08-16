@@ -1,5 +1,6 @@
 """Data models for traffic locations and risk assessment."""
 
+from typing import Optional
 from pydantic import BaseModel, Field
 
 
@@ -10,14 +11,18 @@ class Location(BaseModel):
     name: str = Field(..., description="Name or description of the location")
     latitude: float = Field(..., description="Geographic latitude coordinate")
     longitude: float = Field(..., description="Geographic longitude coordinate")
-    traffic_speed: float = Field(..., description="Current observed traffic speed (e.g., km/h)")
-    free_flow_speed: float = Field(..., description="Uncongested free flow speed limit (e.g., km/h)")
-    traffic_volume: int = Field(..., description="Estimated vehicle count over observation period")
-    incident_frequency: float = Field(..., description="Frequency of traffic incidents (scale 0.0 - 10.0)")
-    accident_history: float = Field(..., description="Historical accident severity/rate (scale 0.0 - 10.0)")
-    road_factor: float = Field(..., description="Road geometry and infrastructure hazard index (scale 0.0 - 1.0)")
-    population_factor: float = Field(..., description="Surrounding population and pedestrian density index (scale 0.0 - 1.0)")
-    police_officers: int = Field(..., description="Number of police officers currently assigned")
+    coordinate_source: str = Field(
+        ...,
+        description="Primary geospatial source or reference for the coordinates",
+    )
+    traffic_speed: float = Field(..., description="Current observed traffic speed (e.g., km/h) [DEMO DATA]")
+    free_flow_speed: float = Field(..., description="Uncongested free flow speed limit (e.g., km/h) [DEMO DATA]")
+    traffic_volume: int = Field(..., description="Estimated vehicle count over observation period [DEMO DATA]")
+    incident_frequency: float = Field(..., description="Frequency of traffic incidents (scale 0.0 - 10.0) [DEMO DATA]")
+    accident_history: float = Field(..., description="Historical accident severity/rate (scale 0.0 - 10.0) [DEMO DATA]")
+    road_factor: float = Field(..., description="Road geometry and infrastructure hazard index (scale 0.0 - 1.0) [DEMO DATA]")
+    population_factor: float = Field(..., description="Surrounding population and pedestrian density index (scale 0.0 - 1.0) [DEMO DATA]")
+    police_officers: int = Field(..., description="Number of police officers currently assigned [DEMO DATA]")
 
 
 class RiskSummary(BaseModel):
@@ -27,6 +32,7 @@ class RiskSummary(BaseModel):
     name: str
     latitude: float
     longitude: float
+    coordinate_source: str
     risk_score: float
     risk_level: str
     police_officers: int
@@ -49,6 +55,7 @@ class RiskDetail(BaseModel):
     name: str
     latitude: float
     longitude: float
+    coordinate_source: str
     traffic_speed: float
     free_flow_speed: float
     traffic_volume: int
