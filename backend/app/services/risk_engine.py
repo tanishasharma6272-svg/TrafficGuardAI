@@ -6,6 +6,7 @@ used for simulation and development, not empirical field calibrations.
 
 from typing import Any, Dict
 from app.models.location import Location
+from app.services.risk_thresholds import classify_risk_score
 
 # Fixed DEMO DATA normalization constants (Explicit demo assumptions)
 MAX_DEMO_TRAFFIC_VOLUME: float = 50000.0
@@ -39,20 +40,9 @@ def calculate_congestion(location: Location) -> float:
 def get_risk_level(score: float) -> str:
     """Map a numerical risk score (0-100) to a categorical risk level.
 
-    Thresholds:
-    - 0-30: Low
-    - 31-60: Medium
-    - 61-80: High
-    - 81-100: Critical
+    Delegates to the canonical shared classification policy in risk_thresholds.py.
     """
-    if score <= 30.0:
-        return "Low"
-    elif score <= 60.0:
-        return "Medium"
-    elif score <= 80.0:
-        return "High"
-    else:
-        return "Critical"
+    return classify_risk_score(score)
 
 
 def calculate_risk_score(location: Location) -> Dict[str, Any]:

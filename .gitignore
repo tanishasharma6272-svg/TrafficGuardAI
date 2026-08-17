@@ -51,3 +51,10 @@ __pycache__/
 # Local data
 data/*
 !data/.gitkeep
+backend/data/generated/
+data/generated/
+backend/data/models/
+data/models/
+*.csv
+*.parquet
+*.joblib
