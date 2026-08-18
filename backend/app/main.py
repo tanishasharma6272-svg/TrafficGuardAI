@@ -1,3 +1,5 @@
+import os
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -13,13 +15,20 @@ app = FastAPI(
     version="0.1.0",
 )
 
-# Allow the local React/Vite development server to call the API.
+# Allow local dev server + deployed frontend to call the API.
+allowed_origins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+]
+
+# Add production frontend URL(s) via env var (comma-separated if more than one)
+prod_origins = os.getenv("FRONTEND_URL", "")
+if prod_origins:
+    allowed_origins.extend([origin.strip() for origin in prod_origins.split(",") if origin.strip()])
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-    ],
+    allow_origins=allowed_origins,
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
