@@ -2,23 +2,24 @@
 
 Loads the selected trained model artifact once from disk and provides pure,
 bounded risk score predictions and standardized risk level categorizations.
+Integrates directly with the configured TrafficProvider (TomTom or Demo).
 """
 
 import json
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 import numpy as np
+from sqlalchemy.orm import Session
 
 from app.db.models import Location as DBLocation
 from app.models.ml_risk import MLRiskDetail, MLRiskSummary
+from app.providers import ProviderFetchError, ProviderStatus, RawTrafficRecord, TrafficProvider, get_traffic_provider
 from app.services.feature_engineering import extract_features, to_numerical_feature_dict
 from app.services.risk_thresholds import classify_risk_score
 from app.services.traffic_normalizer import normalize_record
 
 DEFAULT_MODEL_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "models"
 DEFAULT_METADATA_PATH = DEFAULT_MODEL_DIR / "metadata.json"
-DEFAULT_XGB_PATH = DEFAULT_MODEL_DIR / "xgboost_risk_model.json"
-DEFAULT_BASELINE_PATH = DEFAULT_MODEL_DIR / "baseline_model.joblib"
 
 
 class RiskModelService:
@@ -78,8 +79,6 @@ class RiskModelService:
 
     def _derive_contributing_factors(
         self,
-        traffic_speed: float,
-        free_flow_speed: float,
         congestion_ratio: float,
         speed_deficit: float,
         incident_frequency: float,
@@ -87,11 +86,7 @@ class RiskModelService:
         road_factor: float,
         traffic_pressure_composite: float,
     ) -> List[str]:
-        """Derive readable kinematic traffic hazard indicators.
-
-        NOTE: These are deterministic heuristic physical breakdowns and are
-        EXPLICITLY NOT SHAP feature attributions.
-        """
+        """Derive readable kinematic traffic hazard indicators (non-SHAP heuristic factors)."""
         factors: List[str] = []
 
         if congestion_ratio >= 0.40 or speed_deficit >= 15.0:
@@ -125,32 +120,22 @@ class RiskModelService:
 
         return factors
 
-    def predict_location(self, db_loc: DBLocation) -> MLRiskDetail:
-        """Execute full ML inference pipeline on a single PostgreSQL Location record.
+    def predict_raw_record(
+        self,
+        raw_record: RawTrafficRecord,
+        provider_status: Optional[ProviderStatus] = None,
+    ) -> MLRiskDetail:
+        """Execute full ML inference pipeline on an authoritative RawTrafficRecord.
 
         Args:
-            db_loc: SQLAlchemy Location model instance from PostgreSQL.
+            raw_record: The authoritative RawTrafficRecord from the active TrafficProvider.
+            provider_status: Optional typed operational health status of the provider.
 
         Returns:
             MLRiskDetail: Comprehensive predicted risk detail.
         """
-        # 1. Normalize record using strict validation rules (preserving exact source values)
-        normalized = normalize_record({
-            "location_id": db_loc.id,
-            "name": db_loc.name,
-            "latitude": db_loc.latitude,
-            "longitude": db_loc.longitude,
-            "coordinate_source": db_loc.coordinate_source,
-            "traffic_speed": db_loc.traffic_speed,
-            "free_flow_speed": db_loc.free_flow_speed,
-            "traffic_volume": db_loc.traffic_volume,
-            "incident_frequency": db_loc.incident_frequency,
-            "accident_history": db_loc.accident_history,
-            "road_factor": db_loc.road_factor,
-            "population_factor": db_loc.population_factor,
-            "police_officers": db_loc.police_officers,
-            "data_mode": "DEMO",
-        })
+        # 1. Normalize record using strict validation rules
+        normalized = normalize_record(raw_record)
 
         # 2. Extract feature vector through standard feature engineering pipeline
         fv = extract_features(normalized)
@@ -174,8 +159,6 @@ class RiskModelService:
 
         # 6. Derive heuristic kinematic contributing factors (non-SHAP)
         factors = self._derive_contributing_factors(
-            traffic_speed=fv.traffic_speed,
-            free_flow_speed=fv.free_flow_speed,
             congestion_ratio=fv.congestion_ratio,
             speed_deficit=fv.speed_deficit,
             incident_frequency=fv.incident_frequency,
@@ -184,20 +167,65 @@ class RiskModelService:
             traffic_pressure_composite=fv.traffic_pressure_composite,
         )
 
+        inc_count = raw_record.raw_metadata.get("current_incident_count")
+        acc_count = raw_record.raw_metadata.get("current_accident_count")
+        jam_count = raw_record.raw_metadata.get("current_jam_count")
+        closure_count = raw_record.raw_metadata.get("current_road_closure_count")
+        roadworks_count = raw_record.raw_metadata.get("current_roadworks_count")
+        breakdown_count = raw_record.raw_metadata.get("current_broken_down_vehicle_count")
+        inc_provider = raw_record.raw_metadata.get("incident_provider")
+        inc_state = raw_record.raw_metadata.get("incident_provider_state")
+        inc_timestamp = raw_record.raw_metadata.get("incident_snapshot_timestamp")
+
+        metadata_dict: Dict[str, Any] = {
+            "model_type": self.model_type,
+            "training_data_mode": self.training_data_mode,
+            "feature_count": len(self.feature_names),
+            "provider_mode": raw_record.provider_mode,
+            "shap_available": False,
+            "shap_notice": "SHAP feature attribution is available via dedicated /api/ml/explain endpoint.",
+        }
+
+        if inc_provider is not None:
+            metadata_dict["incident_provider"] = inc_provider
+        if inc_state is not None:
+            metadata_dict["incident_provider_state"] = inc_state
+        if inc_timestamp is not None:
+            metadata_dict["incident_snapshot_timestamp"] = inc_timestamp
+        if inc_count is not None:
+            metadata_dict["current_incident_count"] = inc_count
+        if acc_count is not None:
+            metadata_dict["current_accident_count"] = acc_count
+        if jam_count is not None:
+            metadata_dict["current_jam_count"] = jam_count
+        if closure_count is not None:
+            metadata_dict["current_road_closure_count"] = closure_count
+        if roadworks_count is not None:
+            metadata_dict["current_roadworks_count"] = roadworks_count
+        if breakdown_count is not None:
+            metadata_dict["current_broken_down_vehicle_count"] = breakdown_count
+
+        if provider_status is not None:
+            metadata_dict["traffic_provider"] = provider_status.provider
+            metadata_dict["traffic_provider_state"] = provider_status.aggregate_state
+
+        if "provenance" in raw_record.raw_metadata:
+            metadata_dict["provenance"] = raw_record.raw_metadata["provenance"]
+
         return MLRiskDetail(
-            id=db_loc.id,
-            name=db_loc.name,
-            latitude=db_loc.latitude,
-            longitude=db_loc.longitude,
-            coordinate_source=db_loc.coordinate_source,
-            traffic_speed=db_loc.traffic_speed,
-            free_flow_speed=db_loc.free_flow_speed,
-            traffic_volume=db_loc.traffic_volume,
-            incident_frequency=db_loc.incident_frequency,
-            accident_history=db_loc.accident_history,
-            road_factor=db_loc.road_factor,
-            population_factor=db_loc.population_factor,
-            police_officers=db_loc.police_officers,
+            id=raw_record.location_id,
+            name=raw_record.name,
+            latitude=raw_record.latitude,
+            longitude=raw_record.longitude,
+            coordinate_source=raw_record.coordinate_source,
+            traffic_speed=raw_record.traffic_speed,
+            free_flow_speed=raw_record.free_flow_speed,
+            traffic_volume=raw_record.traffic_volume,
+            incident_frequency=raw_record.incident_frequency,
+            accident_history=raw_record.accident_history,
+            road_factor=raw_record.road_factor,
+            population_factor=raw_record.population_factor,
+            police_officers=raw_record.police_officers,
             congestion_ratio=fv.congestion_ratio,
             speed_deficit=fv.speed_deficit,
             traffic_pressure_composite=fv.traffic_pressure_composite,
@@ -205,29 +233,74 @@ class RiskModelService:
             risk_level=risk_lvl,
             model_type=self.model_type,
             training_data_mode=self.training_data_mode,
+            current_incident_count=inc_count,
+            current_accident_count=acc_count,
+            current_jam_count=jam_count,
+            current_road_closure_count=closure_count,
+            current_roadworks_count=roadworks_count,
+            current_broken_down_vehicle_count=breakdown_count,
+            incident_provider=inc_provider,
+            incident_provider_state=inc_state,
+            incident_snapshot_timestamp=inc_timestamp,
             contributing_factors=factors,
             factor_attribution_method="DERIVED_HEURISTIC_INDICATORS (NOT SHAP)",
-            model_metadata={
-                "model_type": self.model_type,
-                "training_data_mode": self.training_data_mode,
-                "feature_count": len(self.feature_names),
-                "shap_available": False,
-                "shap_notice": "SHAP feature attribution is unavailable in this endpoint and will be provided via dedicated SHAP explainability service.",
-            },
+            model_metadata=metadata_dict,
         )
 
-    def predict_all_locations(self, db_locations: List[DBLocation]) -> List[MLRiskSummary]:
-        """Execute ML inference across a list of PostgreSQL Location records.
+    def predict_location(
+        self,
+        db_loc: DBLocation,
+        db: Optional[Session] = None,
+        provider: Optional[TrafficProvider] = None,
+    ) -> MLRiskDetail:
+        """Execute ML inference for a single location using the configured TrafficProvider.
 
         Args:
-            db_locations: List of SQLAlchemy Location model instances.
+            db_loc: SQLAlchemy Location model instance from PostgreSQL.
+            db: Optional active database session.
+            provider: Optional explicit TrafficProvider instance.
+
+        Returns:
+            MLRiskDetail: Comprehensive predicted risk detail.
+
+        Raises:
+            ProviderFetchError: If the authoritative location record could not be obtained.
+        """
+        active_provider = provider or get_traffic_provider(db=db)
+        raw_record = active_provider.get_location_traffic_record(db_loc.id)
+
+        if raw_record is None:
+            raise ProviderFetchError(
+                f"Traffic provider failed to obtain telemetry for location '{db_loc.name}' (ID: {db_loc.id}).",
+                location_id=db_loc.id,
+            )
+
+        status = active_provider.get_provider_status()
+        return self.predict_raw_record(raw_record, provider_status=status)
+
+    def predict_all_locations(
+        self,
+        db_locations: Optional[List[DBLocation]] = None,
+        db: Optional[Session] = None,
+        provider: Optional[TrafficProvider] = None,
+    ) -> List[MLRiskSummary]:
+        """Execute ML inference across monitored locations via the configured TrafficProvider.
+
+        Args:
+            db_locations: Optional list of SQLAlchemy Location instances (ignored if provider fetches batch).
+            db: Optional active database session.
+            provider: Optional explicit TrafficProvider instance.
 
         Returns:
             List[MLRiskSummary]: List of summarized risk assessments.
         """
+        active_provider = provider or get_traffic_provider(db=db)
+        raw_records = active_provider.get_traffic_records()
+        status = active_provider.get_provider_status()
+
         summaries: List[MLRiskSummary] = []
-        for loc in db_locations:
-            detail = self.predict_location(loc)
+        for raw in raw_records:
+            detail = self.predict_raw_record(raw, provider_status=status)
             summaries.append(
                 MLRiskSummary(
                     id=detail.id,

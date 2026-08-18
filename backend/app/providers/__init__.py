@@ -11,6 +11,11 @@ from app.providers.base import (
     TrafficProvider,
 )
 from app.providers.demo_provider import DemoTrafficProvider
+from app.providers.tomtom_incident_provider import (
+    IncidentRecord,
+    IncidentSnapshot,
+    TomTomIncidentProvider,
+)
 from app.providers.tomtom_provider import (
     ProviderConfigurationError,
     ProviderFetchError,
@@ -63,6 +68,9 @@ __all__ = [
     "TrafficProvider",
     "DemoTrafficProvider",
     "TomTomTrafficProvider",
+    "TomTomIncidentProvider",
+    "IncidentRecord",
+    "IncidentSnapshot",
     "RawTrafficRecord",
     "ProviderStatus",
     "AggregateState",

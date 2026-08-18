@@ -1,9 +1,12 @@
-"""Service coordinating PostgreSQL location ingestion and SHAP explainability generation."""
+"""Service coordinating traffic provider ingestion and SHAP explainability generation."""
 
 from typing import Any, Dict, List, Optional
+from sqlalchemy.orm import Session
+
 from app.db.models import Location as DBLocation
 from app.ml.shap_explainer import MLShapExplainer
 from app.models.ml_explanation import FeatureAttribution, MLRiskExplanation
+from app.providers import ProviderFetchError, RawTrafficRecord, TrafficProvider, get_traffic_provider
 from app.services.feature_engineering import extract_features, to_numerical_feature_dict
 from app.services.risk_model_service import get_risk_model_service
 from app.services.risk_thresholds import classify_risk_score
@@ -11,7 +14,7 @@ from app.services.traffic_normalizer import normalize_record
 
 
 class RiskExplanationService:
-    """Service providing SHAP feature attributions for monitored PostgreSQL locations."""
+    """Service providing SHAP feature attributions for monitored locations."""
 
     def __init__(self) -> None:
         self.model_service = get_risk_model_service()
@@ -21,32 +24,17 @@ class RiskExplanationService:
             feature_names=self.model_service.feature_names,
         )
 
-    def explain_location(self, db_loc: DBLocation) -> MLRiskExplanation:
-        """Generate complete SHAP explanation for a single PostgreSQL Location record.
+    def explain_raw_record(self, raw_record: RawTrafficRecord) -> MLRiskExplanation:
+        """Generate complete SHAP explanation for an authoritative RawTrafficRecord.
 
         Args:
-            db_loc: SQLAlchemy Location model instance from PostgreSQL.
+            raw_record: Authoritative traffic observation from the active provider.
 
         Returns:
             MLRiskExplanation: Structured explanation payload with ranked attributions.
         """
-        # 1. Normalize record preserving exact database values
-        normalized = normalize_record({
-            "location_id": db_loc.id,
-            "name": db_loc.name,
-            "latitude": db_loc.latitude,
-            "longitude": db_loc.longitude,
-            "coordinate_source": db_loc.coordinate_source,
-            "traffic_speed": db_loc.traffic_speed,
-            "free_flow_speed": db_loc.free_flow_speed,
-            "traffic_volume": db_loc.traffic_volume,
-            "incident_frequency": db_loc.incident_frequency,
-            "accident_history": db_loc.accident_history,
-            "road_factor": db_loc.road_factor,
-            "population_factor": db_loc.population_factor,
-            "police_officers": db_loc.police_officers,
-            "data_mode": "DEMO",
-        })
+        # 1. Normalize record preserving exact observation values
+        normalized = normalize_record(raw_record)
 
         # 2. Extract feature vector through standard feature engineering pipeline
         fv = extract_features(normalized)
@@ -79,11 +67,11 @@ class RiskExplanationService:
         risk_lvl = classify_risk_score(bounded_score)
 
         return MLRiskExplanation(
-            location_id=db_loc.id,
-            name=db_loc.name,
-            latitude=db_loc.latitude,
-            longitude=db_loc.longitude,
-            coordinate_source=db_loc.coordinate_source,
+            location_id=raw_record.location_id,
+            name=raw_record.name,
+            latitude=raw_record.latitude,
+            longitude=raw_record.longitude,
+            coordinate_source=raw_record.coordinate_source,
             risk_score=bounded_score,
             raw_prediction=round(raw_pred, 2),
             risk_level=risk_lvl,
@@ -99,6 +87,36 @@ class RiskExplanationService:
                 "expectation and do not represent empirical real-world causality."
             ),
         )
+
+    def explain_location(
+        self,
+        db_loc: DBLocation,
+        db: Optional[Session] = None,
+        provider: Optional[TrafficProvider] = None,
+    ) -> MLRiskExplanation:
+        """Generate SHAP explanation for a location using the active TrafficProvider.
+
+        Args:
+            db_loc: SQLAlchemy Location model instance from PostgreSQL.
+            db: Optional active database session.
+            provider: Optional explicit TrafficProvider instance.
+
+        Returns:
+            MLRiskExplanation: Structured explanation payload.
+
+        Raises:
+            ProviderFetchError: If the location record is unavailable from the provider.
+        """
+        active_provider = provider or get_traffic_provider(db=db)
+        raw_record = active_provider.get_location_traffic_record(db_loc.id)
+
+        if raw_record is None:
+            raise ProviderFetchError(
+                f"Traffic provider failed to obtain telemetry for location '{db_loc.name}' (ID: {db_loc.id}).",
+                location_id=db_loc.id,
+            )
+
+        return self.explain_raw_record(raw_record)
 
 
 # Global singleton instance

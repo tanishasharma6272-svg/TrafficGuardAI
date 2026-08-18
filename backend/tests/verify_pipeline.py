@@ -23,6 +23,8 @@ from app.services.feature_engineering import (
 from app.db.database import SessionLocal
 from app.db.models import Location as DBLocation
 
+EXPECTED_LOCATION_COUNT: int = 50
+
 
 def test_provider_layer():
     print("\n--- 1. Testing Provider Layer ---")
@@ -31,7 +33,7 @@ def test_provider_layer():
     assert provider.provider_mode == "DEMO", f"Expected provider_mode 'DEMO', got {provider.provider_mode}"
 
     raw_records = provider.get_traffic_records()
-    assert len(raw_records) == 20, f"Expected exactly 20 locations from PostgreSQL, got {len(raw_records)}"
+    assert len(raw_records) == EXPECTED_LOCATION_COUNT, f"Expected exactly {EXPECTED_LOCATION_COUNT} locations from PostgreSQL, got {len(raw_records)}"
 
     for rec in raw_records:
         assert isinstance(rec, RawTrafficRecord), "Record must be instance of RawTrafficRecord"
@@ -49,14 +51,14 @@ def test_provider_layer():
     missing_rec = provider.get_location_traffic_record(9999)
     assert missing_rec is None, "Non-existent location should return None"
 
-    print("[PASS] Provider Layer Passed: 20 PostgreSQL locations successfully read with DEMO provider_mode.")
+    print(f"[PASS] Provider Layer Passed: {EXPECTED_LOCATION_COUNT} PostgreSQL locations successfully read with DEMO provider_mode.")
     return raw_records
 
 
 def test_normalization_layer(raw_records):
     print("\n--- 2. Testing Normalization Layer ---")
     normalized_records = normalize_batch(raw_records)
-    assert len(normalized_records) == 20, f"Expected 20 normalized records, got {len(normalized_records)}"
+    assert len(normalized_records) == EXPECTED_LOCATION_COUNT, f"Expected {EXPECTED_LOCATION_COUNT} normalized records, got {len(normalized_records)}"
 
     for norm in normalized_records:
         assert isinstance(norm, NormalizedTrafficRecord), "Record must be NormalizedTrafficRecord"
@@ -117,7 +119,7 @@ def test_normalization_layer(raw_records):
 def test_feature_engineering_layer(normalized_records):
     print("\n--- 3. Testing Feature Engineering Layer ---")
     feature_vectors = extract_feature_batch(normalized_records)
-    assert len(feature_vectors) == 20, f"Expected 20 feature vectors, got {len(feature_vectors)}"
+    assert len(feature_vectors) == EXPECTED_LOCATION_COUNT, f"Expected {EXPECTED_LOCATION_COUNT} feature vectors, got {len(feature_vectors)}"
 
     for fv in feature_vectors:
         assert isinstance(fv, TrafficFeatureVector), "Must be instance of TrafficFeatureVector"
@@ -143,7 +145,7 @@ def test_feature_engineering_layer(normalized_records):
     col_names, matrix = to_feature_matrix(feature_vectors)
     assert len(col_names) == 18, f"Expected 18 numeric feature columns, got {len(col_names)}: {col_names}"
     assert "police_officers" not in col_names, "police_officers must be excluded from default predictor matrix"
-    assert len(matrix) == 20, f"Expected 20 matrix rows, got {len(matrix)}"
+    assert len(matrix) == EXPECTED_LOCATION_COUNT, f"Expected {EXPECTED_LOCATION_COUNT} matrix rows, got {len(matrix)}"
     assert all(len(row) == 18 for row in matrix), "All matrix rows must have 18 features"
 
     # Test optional 19-column contextual matrix
@@ -151,7 +153,7 @@ def test_feature_engineering_layer(normalized_records):
     assert len(col_names_all) == 19
     assert "police_officers" in col_names_all
 
-    print("[PASS] Feature Engineering Layer Passed: 20 feature vectors and 20x18 predictor matrix extracted with documented formulas.")
+    print(f"[PASS] Feature Engineering Layer Passed: {EXPECTED_LOCATION_COUNT} feature vectors and {EXPECTED_LOCATION_COUNT}x18 predictor matrix extracted with documented formulas.")
 
 
 def test_database_integrity():
@@ -159,7 +161,7 @@ def test_database_integrity():
     session = SessionLocal()
     try:
         count = session.query(DBLocation).count()
-        assert count == 20, f"PostgreSQL database should contain exactly 20 locations, found {count}"
+        assert count == EXPECTED_LOCATION_COUNT, f"PostgreSQL database should contain exactly {EXPECTED_LOCATION_COUNT} locations, found {count}"
         print(f"[PASS] Database Integrity Passed: Exactly {count} rows in locations table, zero mutations.")
     finally:
         session.close()
@@ -171,8 +173,8 @@ def test_fastapi_routes():
     import json
 
     endpoints = [
-        ("/locations", lambda d: len(d) == 20),
-        ("/risk", lambda d: len(d) == 20),
+        ("/locations", lambda d: len(d) == EXPECTED_LOCATION_COUNT),
+        ("/risk", lambda d: len(d) == EXPECTED_LOCATION_COUNT),
         ("/risk/1", lambda d: d.get("name") == "Ajni Square" and "contributing_factors" in d),
     ]
 

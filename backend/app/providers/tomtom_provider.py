@@ -1,9 +1,10 @@
 """Real-time TomTom Traffic Flow API data provider for TrafficGuard AI."""
 
+import concurrent.futures
 from datetime import datetime, timezone
 import json
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -12,6 +13,7 @@ from sqlalchemy.orm import Session
 from app.db.database import SessionLocal
 from app.db.models import Location as DBLocation
 from app.providers.base import AggregateState, ProviderStatus, RawTrafficRecord, TrafficProvider
+from app.providers.tomtom_incident_provider import TomTomIncidentProvider
 
 TOMTOM_FLOW_BASE_URL = "https://api.tomtom.com/traffic/services/4/flowSegmentData/absolute/12/json"
 
@@ -20,6 +22,12 @@ TOMTOM_PROVENANCE = {
     "free_flow_speed": "TOMTOM_REALTIME",
     "snapshot_timestamp": "TOMTOM_REALTIME",
     "raw_metadata": "TOMTOM_REALTIME",
+    "current_incident_count": "TOMTOM_REALTIME",
+    "current_accident_count": "TOMTOM_REALTIME",
+    "current_jam_count": "TOMTOM_REALTIME",
+    "current_road_closure_count": "TOMTOM_REALTIME",
+    "current_roadworks_count": "TOMTOM_REALTIME",
+    "current_broken_down_vehicle_count": "TOMTOM_REALTIME",
     "location_id": "POSTGRESQL_CONTEXT",
     "name": "POSTGRESQL_CONTEXT",
     "latitude": "POSTGRESQL_CONTEXT",
@@ -74,6 +82,7 @@ class TomTomTrafficProvider(TrafficProvider):
         api_key: Optional[str] = None,
         timeout: float = 5.0,
         db: Optional[Session] = None,
+        max_workers: int = 5,
     ) -> None:
         """Initialize TomTom traffic provider.
 
@@ -81,12 +90,19 @@ class TomTomTrafficProvider(TrafficProvider):
             api_key: Optional TomTom API key. If omitted, reads from TOMTOM_API_KEY env.
             timeout: HTTP request timeout in seconds. Defaults to 5.0s.
             db: Optional SQLAlchemy database session.
+            max_workers: Thread pool concurrency for batch location fetching. Defaults to 5.
         """
         self.api_key: Optional[str] = api_key if api_key is not None else os.getenv("TOMTOM_API_KEY")
         self.timeout: float = timeout
         self._db: Optional[Session] = db
+        self.max_workers: int = max_workers
         self.last_fetch_results: Dict[int, Dict[str, Any]] = {}
         self.last_fetch_timestamp: Optional[datetime] = None
+        self.incident_provider = TomTomIncidentProvider(
+            api_key=self.api_key,
+            timeout=self.timeout,
+            db=self._db,
+        )
 
     @property
     def provider_mode(self) -> str:
@@ -218,6 +234,7 @@ class TomTomTrafficProvider(TrafficProvider):
         db_loc: DBLocation,
         flow_data: Dict[str, Any],
         snapshot_time: datetime,
+        incident_telemetry: Optional[Dict[str, Any]] = None,
     ) -> RawTrafficRecord:
         """Construct a RawTrafficRecord preserving non-mutated TomTom telemetry and PostgreSQL context."""
         # Extract raw velocity values without clamping or rounding
@@ -228,6 +245,19 @@ class TomTomTrafficProvider(TrafficProvider):
             raise ProviderFetchError(
                 f"Missing speed telemetry in TomTom response for '{db_loc.name}' (ID: {db_loc.id})"
             )
+
+        inc_info = incident_telemetry or {
+            "current_incident_count": 0,
+            "current_accident_count": 0,
+            "current_jam_count": 0,
+            "current_road_closure_count": 0,
+            "current_roadworks_count": 0,
+            "current_broken_down_vehicle_count": 0,
+            "incident_provider": "TomTomIncidentDetailsV5",
+            "incident_provider_state": "UNCONFIGURED" if not self.is_configured() else "LIVE",
+            "incident_snapshot_timestamp": snapshot_time.isoformat(),
+            "incidents": [],
+        }
 
         return RawTrafficRecord(
             location_id=db_loc.id,
@@ -256,16 +286,28 @@ class TomTomTrafficProvider(TrafficProvider):
                     "lat": db_loc.latitude,
                     "lon": db_loc.longitude,
                 },
+                "current_incident_count": inc_info.get("current_incident_count", 0),
+                "current_accident_count": inc_info.get("current_accident_count", 0),
+                "current_jam_count": inc_info.get("current_jam_count", 0),
+                "current_road_closure_count": inc_info.get("current_road_closure_count", 0),
+                "current_roadworks_count": inc_info.get("current_roadworks_count", 0),
+                "current_broken_down_vehicle_count": inc_info.get("current_broken_down_vehicle_count", 0),
+                "incident_provider": inc_info.get("incident_provider", "TomTomIncidentDetailsV5"),
+                "incident_provider_state": inc_info.get("incident_provider_state", "UNCONFIGURED"),
+                "incident_snapshot_timestamp": inc_info.get("incident_snapshot_timestamp"),
+                "nearby_incidents": inc_info.get("incidents", []),
                 "provenance": dict(TOMTOM_PROVENANCE),
             },
         )
 
     def get_traffic_records(self) -> List[RawTrafficRecord]:
-        """Fetch real-time traffic observations across monitored PostgreSQL locations.
+        """Fetch real-time traffic observations across monitored PostgreSQL locations concurrently.
 
-        Iterates over all monitored locations in the database. Successful locations
-        emit RawTrafficRecord with provider_mode='LIVE'. Failed locations are tracked
-        individually without silent fallback to mock data.
+        Iterates over all monitored locations using bounded thread-pool concurrency for flow telemetry
+        and exactly ONE network-wide bounding box request for incident telemetry.
+        Successful locations emit RawTrafficRecord with provider_mode='LIVE'. Failed
+        locations are tracked individually without silent fallback to mock data.
+        Results are returned deterministically sorted by location_id.
 
         Returns:
             List[RawTrafficRecord]: List of successfully fetched live records.
@@ -285,46 +327,83 @@ class TomTomTrafficProvider(TrafficProvider):
         self.last_fetch_timestamp = snapshot_time
         self.last_fetch_results = {}
 
-        records: List[RawTrafficRecord] = []
-
         try:
             db_locations = session.query(DBLocation).order_by(DBLocation.id).all()
-
-            for loc in db_locations:
-                try:
-                    flow_data = self.fetch_flow_segment_raw(loc.latitude, loc.longitude)
-                    record = self._db_and_flow_to_raw_record(loc, flow_data, snapshot_time)
-                    records.append(record)
-                    self.last_fetch_results[loc.id] = {
-                        "status": "SUCCESS",
-                        "location_name": loc.name,
-                        "current_speed": record.traffic_speed,
-                        "free_flow_speed": record.free_flow_speed,
-                        "timestamp": snapshot_time.isoformat(),
-                    }
-                except Exception as e:
-                    self.last_fetch_results[loc.id] = {
-                        "status": "ERROR",
-                        "location_name": loc.name,
-                        "error_message": str(e),
-                        "timestamp": snapshot_time.isoformat(),
-                    }
-
-            if not records and db_locations:
-                # 100% failure rate
-                first_err = next(
-                    (r.get("error_message") for r in self.last_fetch_results.values() if "error_message" in r),
-                    "Unknown error",
-                )
-                raise ProviderFetchError(
-                    f"All {len(db_locations)} TomTom live location requests failed. First error: {first_err}"
-                )
-
-            return records
-
         finally:
             if is_internal_session:
                 session.close()
+
+        if not db_locations:
+            return []
+
+        # Single network-wide bbox incident request
+        incident_telemetry_map: Dict[int, Dict[str, Any]] = {}
+        try:
+            inc_snapshot = self.incident_provider.get_incident_snapshot(locations=db_locations)
+            incident_telemetry_map = self.incident_provider.associate_incidents_to_locations(
+                snapshot=inc_snapshot, locations=db_locations
+            )
+        except Exception as inc_err:
+            for loc in db_locations:
+                incident_telemetry_map[loc.id] = {
+                    "current_incident_count": 0,
+                    "current_accident_count": 0,
+                    "current_jam_count": 0,
+                    "current_road_closure_count": 0,
+                    "current_roadworks_count": 0,
+                    "current_broken_down_vehicle_count": 0,
+                    "incident_provider": "TomTomIncidentDetailsV5",
+                    "incident_provider_state": "ERROR",
+                    "incident_snapshot_timestamp": snapshot_time.isoformat(),
+                    "incidents": [],
+                    "error_message": str(inc_err),
+                }
+
+        def _fetch_single_location(loc: DBLocation) -> Tuple[int, Optional[RawTrafficRecord], Dict[str, Any]]:
+            try:
+                flow_data = self.fetch_flow_segment_raw(loc.latitude, loc.longitude)
+                loc_incident_info = incident_telemetry_map.get(loc.id)
+                record = self._db_and_flow_to_raw_record(loc, flow_data, snapshot_time, loc_incident_info)
+                fetch_result = {
+                    "status": "SUCCESS",
+                    "location_name": loc.name,
+                    "current_speed": record.traffic_speed,
+                    "free_flow_speed": record.free_flow_speed,
+                    "timestamp": snapshot_time.isoformat(),
+                }
+                return (loc.id, record, fetch_result)
+            except Exception as e:
+                fetch_result = {
+                    "status": "ERROR",
+                    "location_name": loc.name,
+                    "error_message": str(e),
+                    "timestamp": snapshot_time.isoformat(),
+                }
+                return (loc.id, None, fetch_result)
+
+        records: List[RawTrafficRecord] = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            futures = [executor.submit(_fetch_single_location, loc) for loc in db_locations]
+            for future in concurrent.futures.as_completed(futures):
+                loc_id, record, fetch_result = future.result()
+                self.last_fetch_results[loc_id] = fetch_result
+                if record is not None:
+                    records.append(record)
+
+        # Guarantee deterministic ordering by location_id
+        records.sort(key=lambda r: r.location_id)
+
+        if not records and db_locations:
+            # 100% failure rate
+            first_err = next(
+                (r.get("error_message") for r in self.last_fetch_results.values() if "error_message" in r),
+                "Unknown error",
+            )
+            raise ProviderFetchError(
+                f"All {len(db_locations)} TomTom live location requests failed. First error: {first_err}"
+            )
+
+        return records
 
     def get_location_traffic_record(self, location_id: int) -> Optional[RawTrafficRecord]:
         """Fetch live traffic observation for a single location by ID.
@@ -354,8 +433,32 @@ class TomTomTrafficProvider(TrafficProvider):
             if not db_loc:
                 return None
 
+            # Fetch incident telemetry for all locations in the network
+            inc_info = None
+            try:
+                all_locs = session.query(DBLocation).order_by(DBLocation.id).all()
+                inc_snapshot = self.incident_provider.get_incident_snapshot(locations=all_locs)
+                matched_map = self.incident_provider.associate_incidents_to_locations(
+                    snapshot=inc_snapshot, locations=[db_loc]
+                )
+                inc_info = matched_map.get(location_id)
+            except Exception as inc_err:
+                inc_info = {
+                    "current_incident_count": 0,
+                    "current_accident_count": 0,
+                    "current_jam_count": 0,
+                    "current_road_closure_count": 0,
+                    "current_roadworks_count": 0,
+                    "current_broken_down_vehicle_count": 0,
+                    "incident_provider": "TomTomIncidentDetailsV5",
+                    "incident_provider_state": "ERROR",
+                    "incident_snapshot_timestamp": snapshot_time.isoformat(),
+                    "incidents": [],
+                    "error_message": str(inc_err),
+                }
+
             flow_data = self.fetch_flow_segment_raw(db_loc.latitude, db_loc.longitude)
-            record = self._db_and_flow_to_raw_record(db_loc, flow_data, snapshot_time)
+            record = self._db_and_flow_to_raw_record(db_loc, flow_data, snapshot_time, inc_info)
             self.last_fetch_results[location_id] = {
                 "status": "SUCCESS",
                 "location_name": db_loc.name,

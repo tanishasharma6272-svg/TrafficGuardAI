@@ -29,6 +29,8 @@ from app.providers.tomtom_provider import (
 from app.providers import get_traffic_provider
 from app.services.traffic_normalizer import normalize_record
 
+EXPECTED_LOCATION_COUNT: int = 50
+
 
 def test_configuration_and_factory():
     print("\n--- 1. Testing Configuration & Provider Factory (Strict Validation) ---")
@@ -58,7 +60,7 @@ def test_configuration_and_factory():
     assert isinstance(status_demo, ProviderStatus)
     assert status_demo.provider == "DemoTrafficProvider"
     assert status_demo.aggregate_state == "LIVE"
-    assert status_demo.successful_count == 20
+    assert status_demo.successful_count == EXPECTED_LOCATION_COUNT
     print("       [PASS] TRAFFIC_PROVIDER=demo instantiated DemoTrafficProvider with typed ProviderStatus.")
 
     # A4. TRAFFIC_PROVIDER=tomtom without TOMTOM_API_KEY -> UNCONFIGURED
@@ -151,16 +153,16 @@ def test_typed_provider_status_across_states():
     with patch.object(provider, "fetch_flow_segment_raw", return_value=mock_flow):
         records = provider.get_traffic_records()
 
-    assert len(records) == 20
+    assert len(records) == EXPECTED_LOCATION_COUNT
     assert all(r.provider_mode == "LIVE" for r in records)
     status_live = provider.get_provider_status()
     assert isinstance(status_live, ProviderStatus)
     assert status_live.aggregate_state == "LIVE"
-    assert status_live.successful_count == 20
+    assert status_live.successful_count == EXPECTED_LOCATION_COUNT
     assert status_live.failed_count == 0
-    assert status_live.total_locations == 20
+    assert status_live.total_locations == EXPECTED_LOCATION_COUNT
     assert len(status_live.per_location_errors) == 0
-    print("       Scenario A (All 20 Succeed) -> ProviderStatus(aggregate_state='LIVE', successful_count=20, failed_count=0)")
+    print(f"       Scenario A (All {EXPECTED_LOCATION_COUNT} Succeed) -> ProviderStatus(aggregate_state='LIVE', successful_count={EXPECTED_LOCATION_COUNT}, failed_count=0)")
 
     # D2. Partial Failure (Calls 3 & 7 fail) -> State: PARTIAL
     call_count = 0
@@ -174,16 +176,16 @@ def test_typed_provider_status_across_states():
     with patch.object(provider, "fetch_flow_segment_raw", side_effect=mixed_fetch):
         records_partial = provider.get_traffic_records()
 
-    assert len(records_partial) == 18
+    assert len(records_partial) == EXPECTED_LOCATION_COUNT - 2
     assert all(r.provider_mode == "LIVE" for r in records_partial)
     status_partial = provider.get_provider_status()
     assert isinstance(status_partial, ProviderStatus)
     assert status_partial.aggregate_state == "PARTIAL"
-    assert status_partial.successful_count == 18
+    assert status_partial.successful_count == EXPECTED_LOCATION_COUNT - 2
     assert status_partial.failed_count == 2
-    assert status_partial.total_locations == 20
+    assert status_partial.total_locations == EXPECTED_LOCATION_COUNT
     assert len(status_partial.per_location_errors) == 2
-    print("       Scenario B (Partial Failure) -> ProviderStatus(aggregate_state='PARTIAL', successful_count=18, failed_count=2, 0 DEMO fallbacks)")
+    print(f"       Scenario B (Partial Failure) -> ProviderStatus(aggregate_state='PARTIAL', successful_count={EXPECTED_LOCATION_COUNT - 2}, failed_count=2, 0 DEMO fallbacks)")
 
     # D3. 100% Failure -> State: ERROR
     with patch.object(provider, "fetch_flow_segment_raw", side_effect=ProviderFetchError("HTTP 500: Server Error", status_code=500)):
@@ -191,14 +193,14 @@ def test_typed_provider_status_across_states():
             provider.get_traffic_records()
             assert False, "Should have raised ProviderFetchError on 100% failure"
         except ProviderFetchError as e:
-            assert "All 20 TomTom live location requests failed" in str(e)
+            assert f"All {EXPECTED_LOCATION_COUNT} TomTom live location requests failed" in str(e)
             status_error = provider.get_provider_status()
             assert isinstance(status_error, ProviderStatus)
             assert status_error.aggregate_state == "ERROR"
             assert status_error.successful_count == 0
-            assert status_error.failed_count == 20
-            assert len(status_error.per_location_errors) == 20
-            print("       Scenario C (100% Failure) -> ProviderStatus(aggregate_state='ERROR', successful_count=0, failed_count=20, 0 DEMO fallbacks)")
+            assert status_error.failed_count == EXPECTED_LOCATION_COUNT
+            assert len(status_error.per_location_errors) == EXPECTED_LOCATION_COUNT
+            print(f"       Scenario C (100% Failure) -> ProviderStatus(aggregate_state='ERROR', successful_count=0, failed_count={EXPECTED_LOCATION_COUNT}, 0 DEMO fallbacks)")
 
     print("[PASS] Typed ProviderStatus Verified across all operational states.")
 
@@ -249,22 +251,25 @@ def test_live_tomtom_api_call_if_configured():
         print("[PASS] Live API Check: Safe bypass verified when credentials are absent.")
         return
 
-    provider = TomTomTrafficProvider(api_key=live_key)
+    provider = TomTomTrafficProvider(api_key=live_key, max_workers=5)
 
-    # Perform single provider request for Location 1 (Ajni Square, Nagpur)
+    # 1. Measure single location latency (Ajni Square, Nagpur)
+    import time
+    t0 = time.perf_counter()
     rec = provider.get_location_traffic_record(1)
+    single_lat_ms = (time.perf_counter() - t0) * 1000.0
     assert rec is not None, "Failed to retrieve location 1 from live TomTom provider"
 
-    # 1. Verify provider_mode == "LIVE"
+    # Verify provider_mode == "LIVE"
     assert rec.provider_mode == "LIVE", f"Expected provider_mode 'LIVE', got '{rec.provider_mode}'"
 
-    # 2. Verify traffic_speed and free_flow_speed are numeric and within valid physical bounds
+    # Verify traffic_speed and free_flow_speed are numeric and within valid physical bounds
     assert isinstance(rec.traffic_speed, (int, float)), f"traffic_speed must be numeric, got {type(rec.traffic_speed)}"
     assert isinstance(rec.free_flow_speed, (int, float)), f"free_flow_speed must be numeric, got {type(rec.free_flow_speed)}"
     assert rec.traffic_speed >= 0.0, f"traffic_speed cannot be negative: {rec.traffic_speed}"
     assert rec.free_flow_speed > 0.0, f"free_flow_speed must be positive: {rec.free_flow_speed}"
 
-    # 3. Verify structured provenance
+    # Verify structured provenance
     prov = rec.raw_metadata.get("provenance", {})
     assert prov.get("traffic_speed") == "TOMTOM_REALTIME", f"Invalid traffic_speed provenance: {prov.get('traffic_speed')}"
     assert prov.get("free_flow_speed") == "TOMTOM_REALTIME", f"Invalid free_flow_speed provenance: {prov.get('free_flow_speed')}"
@@ -275,23 +280,36 @@ def test_live_tomtom_api_call_if_configured():
     assert prov.get("accident_history") == "POSTGRESQL_CONTEXT"
     assert prov.get("police_officers") == "POSTGRESQL_CONTEXT"
 
-    # 4. Verify raw_metadata contains returned TomTom telemetry
+    # Verify raw_metadata contains returned TomTom telemetry
     assert rec.raw_metadata.get("provider") == "TomTom Traffic Flow API v4"
     assert "confidence" in rec.raw_metadata
     assert "frc" in rec.raw_metadata
     assert "source_coordinates" in rec.raw_metadata
 
-    # 5. Verify record is associated with the requested PostgreSQL location
+    # Verify record is associated with the requested PostgreSQL location
     assert rec.location_id == 1, f"Expected location_id 1, got {rec.location_id}"
     assert rec.name == "Ajni Square", f"Expected 'Ajni Square', got '{rec.name}'"
     assert rec.latitude == 21.1182, f"Expected latitude 21.1182, got {rec.latitude}"
     assert rec.longitude == 79.0721, f"Expected longitude 79.0721, got {rec.longitude}"
 
     status = provider.get_provider_status()
-    print(f"       Live Nagpur Flow Telemetry: Location = {rec.name} (ID: {rec.location_id})")
+    print(f"       Single Location Telemetry: {rec.name} (ID: {rec.location_id}) | Latency: {single_lat_ms:.1f}ms")
     print(f"       Observed Speed = {rec.traffic_speed} km/h, Free-flow = {rec.free_flow_speed} km/h, FRC = {rec.raw_metadata.get('frc')}, Confidence = {rec.raw_metadata.get('confidence')}")
-    print(f"       Provider State = {status.aggregate_state}, Success Count = {status.successful_count}, Failed Count = {status.failed_count}")
-    print(f"[PASS] Live TomTom API Verified: Successfully ingested real traffic flow for {rec.name}.")
+
+    # 2. Measure concurrent batch fetching latency across all locations
+    t_batch_start = time.perf_counter()
+    batch_records = provider.get_traffic_records()
+    batch_lat_ms = (time.perf_counter() - t_batch_start) * 1000.0
+
+    assert len(batch_records) == EXPECTED_LOCATION_COUNT, f"Expected {EXPECTED_LOCATION_COUNT} live records, got {len(batch_records)}"
+    # Verify deterministic sorting by location_id
+    ids = [r.location_id for r in batch_records]
+    assert ids == sorted(ids), f"Batch records not sorted by location_id: {ids}"
+    assert batch_lat_ms < 8000.0, f"Batch latency exceeded 8000ms: {batch_lat_ms:.1f}ms"
+
+    print(f"       Concurrent Batch Telemetry ({EXPECTED_LOCATION_COUNT} locations, 5 workers) | Latency: {batch_lat_ms:.1f}ms (Avg/loc: {batch_lat_ms/EXPECTED_LOCATION_COUNT:.1f}ms)")
+    print(f"       Provider State = {provider.get_provider_status().aggregate_state}, Success Count = {EXPECTED_LOCATION_COUNT}, Failed Count = 0")
+    print(f"[PASS] Live TomTom API & Concurrency Verified: {EXPECTED_LOCATION_COUNT} locations ingested in {batch_lat_ms:.1f}ms.")
 
 
 def test_database_safety():
@@ -299,7 +317,7 @@ def test_database_safety():
     session = SessionLocal()
     try:
         count = session.query(DBLocation).count()
-        assert count == 20, f"Database location count altered: {count}"
+        assert count == EXPECTED_LOCATION_COUNT, f"Database location count altered: {count}"
         print(f"[PASS] Database Safety: Exactly {count} rows in locations table, zero mutations.")
     finally:
         session.close()

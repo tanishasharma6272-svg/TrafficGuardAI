@@ -19,6 +19,8 @@ from app.ml import (
 from app.db.database import SessionLocal
 from app.db.models import Location as DBLocation
 
+EXPECTED_LOCATION_COUNT: int = 50
+
 
 def test_reproducibility():
     print("\n--- 1. Testing Deterministic Seed Reproducibility ---")
@@ -45,11 +47,11 @@ def test_dataset_generation_and_saving():
     print("\n--- 2. Testing 14-Day Dataset Generation & Artifact Output ---")
     data, meta = generate_synthetic_dataset(days=14, seed=RANDOM_SEED)
 
-    # 14 days * 24 hours * 20 locations = 6,720 rows
-    expected_rows = 14 * 24 * 20
+    # 14 days * 24 hours * EXPECTED_LOCATION_COUNT rows
+    expected_rows = 14 * 24 * EXPECTED_LOCATION_COUNT
     assert len(data) == expected_rows, f"Expected {expected_rows} rows, got {len(data)}"
     assert meta["total_records"] == expected_rows
-    assert meta["total_locations"] == 20
+    assert meta["total_locations"] == EXPECTED_LOCATION_COUNT
     assert meta["data_mode"] == "SYNTHETIC_DEVELOPMENT"
 
     # Save to disk
@@ -80,15 +82,16 @@ def test_loader_and_integrity_checks(csv_path):
         assert col in fieldnames, f"Missing required column: {col}"
 
     summary = verify_dataset_integrity(records)
-    assert summary["total_records"] == 6720
-    assert summary["unique_locations"] == 20
+    expected_total = 14 * 24 * EXPECTED_LOCATION_COUNT
+    assert summary["total_records"] == expected_total
+    assert summary["unique_locations"] == EXPECTED_LOCATION_COUNT
     assert summary["unique_timestamps"] == 336
     assert 0.0 <= summary["min_risk_score"] <= summary["max_risk_score"] <= 100.0
 
     # Verify each location has exactly 336 hourly observations
     from collections import Counter
     loc_counts = Counter(r["location_id"] for r in records)
-    assert len(loc_counts) == 20
+    assert len(loc_counts) == EXPECTED_LOCATION_COUNT
     assert all(c == 336 for c in loc_counts.values()), "Every location must have 336 hourly observations"
 
     print(f"[PASS] Loader & Integrity Verified: 26 columns, 0 NaNs, target range [{summary['min_risk_score']:.1f}, {summary['max_risk_score']:.1f}].")
@@ -117,16 +120,16 @@ def test_chronological_splitting(records):
     assert max_train_ts < min_val_ts, f"Temporal leak: max train {max_train_ts} >= min val {min_val_ts}"
     assert max_val_ts < min_test_ts, f"Temporal leak: max val {max_val_ts} >= min test {min_test_ts}"
 
-    # Verify all 20 locations are present in every split
+    # Verify all locations are present in every split
     train_locs = {r["location_id"] for r in train_set}
     val_locs = {r["location_id"] for r in val_set}
     test_locs = {r["location_id"] for r in test_set}
 
-    assert len(train_locs) == 20, f"Expected 20 locations in train set, got {len(train_locs)}"
-    assert len(val_locs) == 20, f"Expected 20 locations in val set, got {len(val_locs)}"
-    assert len(test_locs) == 20, f"Expected 20 locations in test set, got {len(test_locs)}"
+    assert len(train_locs) == EXPECTED_LOCATION_COUNT, f"Expected {EXPECTED_LOCATION_COUNT} locations in train set, got {len(train_locs)}"
+    assert len(val_locs) == EXPECTED_LOCATION_COUNT, f"Expected {EXPECTED_LOCATION_COUNT} locations in val set, got {len(val_locs)}"
+    assert len(test_locs) == EXPECTED_LOCATION_COUNT, f"Expected {EXPECTED_LOCATION_COUNT} locations in test set, got {len(test_locs)}"
 
-    print("[PASS] Chronological Split Verified: Strict non-overlapping time boundaries with all 20 locations preserved.")
+    print(f"[PASS] Chronological Split Verified: Strict non-overlapping time boundaries with all {EXPECTED_LOCATION_COUNT} locations preserved.")
 
 
 def test_database_and_git_safety():
@@ -134,7 +137,7 @@ def test_database_and_git_safety():
     session = SessionLocal()
     try:
         count = session.query(DBLocation).count()
-        assert count == 20, f"Database location count altered: {count}"
+        assert count == EXPECTED_LOCATION_COUNT, f"Database location count altered: {count}"
         print(f"[PASS] Database Safety Verified: PostgreSQL contains exactly {count} seed rows, zero mutations.")
     finally:
         session.close()

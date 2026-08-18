@@ -171,11 +171,15 @@ def split_train_val_test_chronological(
     return train_set, val_set, test_set
 
 
-def verify_dataset_integrity(records: List[Dict[str, Any]]) -> Dict[str, Any]:
+def verify_dataset_integrity(
+    records: List[Dict[str, Any]],
+    expected_locations: Optional[int] = None,
+) -> Dict[str, Any]:
     """Execute comprehensive validation checks on generated training dataset.
 
     Args:
         records: Parsed dataset rows.
+        expected_locations: Optional expected number of unique locations.
 
     Returns:
         Dict[str, Any]: Summary dictionary of verified metrics.
@@ -186,7 +190,10 @@ def verify_dataset_integrity(records: List[Dict[str, Any]]) -> Dict[str, Any]:
     assert len(records) > 0, "Dataset is empty"
 
     unique_locations = {r["location_id"] for r in records}
-    assert len(unique_locations) == 20, f"Expected 20 unique location IDs, found {len(unique_locations)}"
+    if expected_locations is not None:
+        assert len(unique_locations) == expected_locations, f"Expected {expected_locations} unique location IDs, found {len(unique_locations)}"
+    else:
+        assert len(unique_locations) > 0, "No unique location IDs found"
 
     unique_timestamps = {r["timestamp"] for r in records}
     assert len(unique_timestamps) > 0, "No timestamps found"

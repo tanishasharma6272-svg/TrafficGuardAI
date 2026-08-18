@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from app.db import get_db
 from app.db.models import Location as DBLocation
 from app.models.ml_explanation import MLRiskExplanation
+from app.providers import ProviderConfigurationError, ProviderFetchError
 from app.services.risk_explanation_service import get_risk_explanation_service
 
 router = APIRouter(prefix="/api/ml", tags=["ML Explainability (SHAP)"])
@@ -15,7 +16,7 @@ router = APIRouter(prefix="/api/ml", tags=["ML Explainability (SHAP)"])
     "/explain/{location_id}",
     response_model=MLRiskExplanation,
     summary="Get SHAP feature attributions for a specific location",
-    description="Loads the location from PostgreSQL, computes SHAP attributions using the trained model, and returns ranked feature impacts.",
+    description="Loads the location via active TrafficProvider, computes SHAP attributions on the live feature vector, and returns ranked feature impacts.",
 )
 def get_location_explanation(
     location_id: int,
@@ -30,4 +31,10 @@ def get_location_explanation(
         )
 
     service = get_risk_explanation_service()
-    return service.explain_location(db_loc)
+    try:
+        return service.explain_location(db_loc, db=db)
+    except (ProviderFetchError, ProviderConfigurationError) as err:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Traffic provider failed for location {location_id}: {err}",
+        ) from err

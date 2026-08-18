@@ -87,6 +87,9 @@ def test_live_shap_endpoint():
     finally:
         session.close()
 
+    assert loc1 is not None, "Location 1 must exist in PostgreSQL database"
+    assert loc12 is not None, "Location 12 must exist in PostgreSQL database"
+
     # 1. Test GET /api/ml/explain/1
     url1 = "http://127.0.0.1:8000/api/ml/explain/1"
     with urllib.request.urlopen(url1) as resp:
@@ -122,16 +125,16 @@ def test_backward_compatibility_and_database_safety():
     session = SessionLocal()
     try:
         count = session.query(DBLocation).count()
-        assert count == 20, f"Database location count altered: {count}"
+        assert count == 50, f"Database location count altered: {count}"
         print(f"[PASS] Database Safety Verified: Exactly {count} rows in locations table, zero mutations.")
     finally:
         session.close()
 
     endpoints = [
-        ("/locations", 20),
-        ("/risk", 20),
+        ("/locations", 50),
+        ("/risk", 50),
         ("/risk/1", "Ajni Square"),
-        ("/api/ml/risk", 20),
+        ("/api/ml/risk", 50),
         ("/api/ml/risk/1", "Ajni Square"),
     ]
     for path, expected in endpoints:

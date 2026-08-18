@@ -1,6 +1,6 @@
 """Pydantic models for ML risk prediction API responses."""
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
 
@@ -37,6 +37,35 @@ class MLRiskDetail(MLRiskSummary):
     congestion_ratio: float = Field(..., ge=0.0, le=1.0, description="Speed loss delay ratio [0, 1]")
     speed_deficit: float = Field(..., ge=0.0, description="Speed deficit below free-flow (km/h)")
     traffic_pressure_composite: float = Field(..., ge=0.0, le=1.0, description="Volume-population pressure composite")
+
+    # Real-Time Incident Telemetry (TomTom Incident Details v5 - Optional & Non-ML-Predictor)
+    current_incident_count: Optional[int] = Field(
+        default=None, description="Current active nearby incident count"
+    )
+    current_accident_count: Optional[int] = Field(
+        default=None, description="Current active nearby accident count"
+    )
+    current_jam_count: Optional[int] = Field(
+        default=None, description="Current active nearby traffic jam count"
+    )
+    current_road_closure_count: Optional[int] = Field(
+        default=None, description="Current active nearby road closure count"
+    )
+    current_roadworks_count: Optional[int] = Field(
+        default=None, description="Current active nearby roadworks count"
+    )
+    current_broken_down_vehicle_count: Optional[int] = Field(
+        default=None, description="Current active nearby broken-down vehicle count"
+    )
+    incident_provider: Optional[str] = Field(
+        default=None, description="Incident data provider implementation name"
+    )
+    incident_provider_state: Optional[str] = Field(
+        default=None, description="Operational state of incident provider (LIVE, ERROR, UNCONFIGURED)"
+    )
+    incident_snapshot_timestamp: Optional[str] = Field(
+        default=None, description="UTC ISO timestamp of incident snapshot"
+    )
 
     # Explicitly labeled non-SHAP contributing factors
     contributing_factors: List[str] = Field(
